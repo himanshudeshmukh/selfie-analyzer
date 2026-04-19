@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: selfie-analyzer
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python script.py
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: FLASK_DEBUG
+        value: "false"
