@@ -11,7 +11,12 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libgomp1 \
+    libopengl0 \
+    libglvnd0 \
     && rm -rf /var/lib/apt/lists/*
+
+# Set OpenCV to use software rendering instead of GPU
+ENV LIBGL_ALWAYS_INDIRECT=1
 
 # Copy requirements.txt and install Python dependencies
 COPY requirements.txt .
