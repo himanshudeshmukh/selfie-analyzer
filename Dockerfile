@@ -1,5 +1,5 @@
-# Use official Python runtime as a parent image
-FROM python:3.10-slim
+# Use official Python runtime with more packages available
+FROM python:3.10-bullseye
 
 # Set working directory in container
 WORKDIR /app
@@ -11,7 +11,6 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libgomp1 \
-    libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements.txt and install Python dependencies
