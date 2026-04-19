@@ -74,7 +74,8 @@ class SelfieAnalyzer:
 
     def color_tone(self, colors):
         """
-        Determine the color tone (warm, cool, neutral) based on the dominant color.
+        Determine the color tone (warm, cool, neutral) based on dominant colors.
+        Uses HSL color space for more accurate classification.
 
         Args:
             colors (list): List of dominant colors.
@@ -84,25 +85,66 @@ class SelfieAnalyzer:
         """
         if not colors:
             return 'neutral'
-        # Extract RGB from the first (most dominant) color
-        hex_color = colors[0]['hex']
-        r, g, b = [int(hex_color[i:i+2], 16) for i in (1, 3, 5)]
-        # Calculate hue
-        max_val = max(r, g, b)
-        min_val = min(r, g, b)
-        if max_val == min_val:
-            hue = 0
-        elif max_val == r:
-            hue = 60 * ((g - b) / (max_val - min_val))
-        elif max_val == g:
-            hue = 60 * (2 + (b - r) / (max_val - min_val))
-        else:
-            hue = 60 * (4 + (r - g) / (max_val - min_val))
-        hue = (hue + 360) % 360
-        # Determine tone
-        if hue <= 60 or hue >= 300:
+        
+        # Analyze top 3 colors instead of just one
+        warm_score = 0
+        cool_score = 0
+        neutral_score = 0
+        
+        for i, color_data in enumerate(colors[:3]):
+            hex_color = color_data['hex']
+            r, g, b = [int(hex_color[j:j+2], 16) for j in (1, 3, 5)]
+            
+            # Normalize RGB to 0-1
+            r_norm, g_norm, b_norm = r/255.0, g/255.0, b/255.0
+            
+            # Calculate HSL
+            max_val = max(r_norm, g_norm, b_norm)
+            min_val = min(r_norm, g_norm, b_norm)
+            l = (max_val + min_val) / 2.0
+            
+            if max_val == min_val:
+                h = 0
+                s = 0
+            else:
+                d = max_val - min_val
+                s = d / (2 - max_val - min_val) if l > 0.5 else d / (max_val + min_val)
+                
+                if max_val == r_norm:
+                    h = 60 * (((g_norm - b_norm) / d + (6 if g_norm < b_norm else 0)) % 6)
+                elif max_val == g_norm:
+                    h = 60 * (((b_norm - r_norm) / d + 2) % 6)
+                else:
+                    h = 60 * (((r_norm - g_norm) / d + 4) % 6)
+            
+            # Weight by percentage (more dominant colors matter more)
+            weight = (3 - i) / 3.0  # First color: 1.0, second: 0.67, third: 0.33
+            
+            # Classify based on hue with saturation consideration
+            if s < 0.1:  # Grayscale
+                neutral_score += weight
+            elif h <= 60 or h >= 300:  # Red-Yellow range
+                # More weight if saturated
+                warm_score += weight * (1 + s * 0.5)
+            elif 60 < h < 150:  # Yellow-Green range
+                if s > 0.5:
+                    cool_score += weight * 0.5
+                else:
+                    neutral_score += weight
+            elif 150 <= h <= 270:  # Green-Blue-Cyan range
+                cool_score += weight * (1 + s * 0.3)
+            elif 270 < h < 300:  # Blue-Magenta range
+                cool_score += weight * 0.7
+        
+        # Determine overall tone
+        if max(warm_score, cool_score, neutral_score) == 0:
+            return 'neutral'
+        
+        max_score = max(warm_score, cool_score, neutral_score)
+        
+        if warm_score == max_score and warm_score > cool_score * 1.2:
             return 'warm'
-        elif 180 <= hue < 300:
+        elif cool_score == max_score and cool_score > warm_score * 1.2:
             return 'cool'
         else:
             return 'neutral'
@@ -145,30 +187,74 @@ class SelfieAnalyzer:
         faces = self.face_cascade.detectMultiScale(gray, 1.1, 5)
         if len(faces) == 0:
             return 'not_detected'
+        
         # Use the first detected face
         x, y, w, h = faces[0]
         face_roi = gray[y:y+h, x:x+w]
+        
+        # Calculate aspect ratio
         aspect_ratio = w / h
-        # Threshold the face ROI
+        
+        # Apply adaptive threshold for better contour detection
         _, thresh = cv2.threshold(face_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        
+        # Dilate and erode to connect broken regions
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        
         # Find contours
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            # Calculate roundness using convex hull
-            largest_contour = max(contours, key=cv2.contourArea)
-            hull = cv2.convexHull(largest_contour)
-            hull_area = cv2.contourArea(hull)
-            contour_area = cv2.contourArea(largest_contour)
-            roundness = contour_area / hull_area if hull_area > 0 else 0.5
+        
+        if not contours:
+            # Fallback based on aspect ratio only
+            if aspect_ratio > 1.25:
+                return 'oblong'
+            elif aspect_ratio < 0.85:
+                return 'round'
+            else:
+                return 'oval'
+        
+        # Get the largest contour (face outline)
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Calculate solidity (area / convex hull area)
+        hull = cv2.convexHull(largest_contour)
+        hull_area = cv2.contourArea(hull)
+        contour_area = cv2.contourArea(largest_contour)
+        solidity = contour_area / hull_area if hull_area > 0 else 0.5
+        
+        # Calculate circularity (4π*area / perimeter²)
+        perimeter = cv2.arcLength(largest_contour, True)
+        circularity = (4 * 3.14159 * contour_area) / (perimeter ** 2) if perimeter > 0 else 0
+        
+        # Fit an ellipse to get better roundness measure
+        if len(largest_contour) >= 5:
+            ellipse = cv2.fitEllipse(largest_contour)
+            major_axis = max(ellipse[1])
+            minor_axis = min(ellipse[1])
+            ellipse_ratio = major_axis / minor_axis if minor_axis > 0 else 1.0
         else:
-            roundness = 0.5
-        # Classify based on aspect ratio and roundness
-        if aspect_ratio > 1.3:
+            ellipse_ratio = aspect_ratio
+        
+        # Enhanced classification logic
+        # Oblong: high aspect ratio
+        if aspect_ratio > 1.25:
             return 'oblong'
-        elif aspect_ratio < 0.9:
-            return 'heart' if roundness > 0.75 else 'round'
-        else:
-            return 'oval' if roundness > 0.8 else 'square'
+        
+        # Round: high circularity and low solidity
+        if circularity > 0.75 and solidity < 0.85:
+            return 'round'
+        
+        # Heart: narrow at top, wider at bottom (low aspect ratio + specific solidity)
+        if aspect_ratio < 0.85 and solidity > 0.82:
+            return 'heart'
+        
+        # Square: similar aspect ratio and high solidity
+        if 0.9 <= aspect_ratio <= 1.1 and solidity > 0.85 and circularity < 0.70:
+            return 'square'
+        
+        # Oval: everything else (default)
+        return 'oval'
 
     def process(self, image_path):
         """
