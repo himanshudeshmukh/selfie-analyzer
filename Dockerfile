@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libgomp1 \
-    libopengl0 \
-    libglvnd0 \
+    libgl1 \
+    libglu1-mesa \
     && rm -rf /var/lib/apt/lists/*
 
 # Set OpenCV to use software rendering instead of GPU
