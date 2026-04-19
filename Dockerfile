@@ -8,14 +8,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the application app
-COPY app.py .
+# Copy the application script
+COPY script.py .
 
 # Expose port 5000 for Flask
 EXPOSE 5000
 
 # Set environment variable for Flask
-ENV FLASK_APP=app.py
+ENV FLASK_APP=script.py
 ENV FLASK_ENV=production
 
 # Run the application with Gunicorn (production WSGI server)
