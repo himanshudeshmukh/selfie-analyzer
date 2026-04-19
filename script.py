@@ -6,64 +6,88 @@ import base64
 import tempfile
 from flask import Flask, request, jsonify
 from sklearn.cluster import KMeans
+import mediapipe as mp
 
 # Initialize Flask app
 app = Flask(__name__)
 
+
 class SelfieAnalyzer:
     """
-    A class for analyzing selfies to extract various features like dominant colors,
-    color tone, brightness, and face shape.
+    A class for analyzing selfies to extract various features like skin tone,
+    color tone, brightness, and face shape using MediaPipe Face Mesh.
     """
 
-    def __init__(self, k=3, max_size=1024):
-        """
-        Initialize the SelfieAnalyzer.
+    # Key landmark indices for face shape measurement
+    FOREHEAD_TOP = 10
+    CHIN_BOTTOM = 152
+    LEFT_CHEEK = 234
+    RIGHT_CHEEK = 454
+    LEFT_JAW = 172
+    RIGHT_JAW = 397
+    LEFT_FOREHEAD = 71
+    RIGHT_FOREHEAD = 301
+    LEFT_CHEEKBONE = 116
+    RIGHT_CHEEKBONE = 345
 
-        Args:
-            k (int): Number of dominant colors to extract.
-            max_size (int): Maximum size for image resizing to optimize processing.
-        """
+    # Skin sample regions
+    SKIN_REGIONS = {
+        'forehead': [10, 67, 69, 104, 108, 109, 151, 299, 337, 338],
+        'left_cheek': [116, 117, 118, 119, 120, 121, 123, 126, 142, 203],
+        'right_cheek': [345, 346, 347, 348, 349, 350, 352, 355, 371, 423],
+    }
+
+    def __init__(self, k=3, max_size=1024):
         self.k = k
         self.max_size = max_size
-        # Load Haar cascade for face detection
-        self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5
+        )
 
     def _resize(self, img):
-        """
-        Resize the image if it exceeds the maximum size to improve performance.
-
-        Args:
-            img (numpy.ndarray): Input image.
-
-        Returns:
-            numpy.ndarray: Resized image if necessary, otherwise original.
-        """
         h, w = img.shape[:2]
         if max(h, w) <= self.max_size:
             return img
         scale = self.max_size / max(h, w)
         return cv2.resize(img, (int(w * scale), int(h * scale)))
 
-    def dominant_colors(self, img):
-        """
-        Extract the dominant colors from the image using K-Means clustering.
+    def _get_landmarks(self, img):
+        results = self.face_mesh.process(img)
+        if not results.multi_face_landmarks:
+            return None
+        landmarks = results.multi_face_landmarks[0]
+        h, w = img.shape[:2]
+        return [(int(lm.x * w), int(lm.y * h)) for lm in landmarks.landmark]
 
-        Args:
-            img (numpy.ndarray): Input image in RGB format.
+    def _sample_skin_colors(self, img, landmarks):
+        h, w = img.shape[:2]
+        skin_pixels = []
 
-        Returns:
-            list: List of dictionaries with hex color and percentage.
-        """
-        # Reshape image to a list of pixels
-        pixels = img.reshape(-1, 3).astype(np.float32)
-        # Perform K-Means clustering
+        for region_name, indices in self.SKIN_REGIONS.items():
+            for idx in indices:
+                cx, cy = landmarks[idx]
+                for dx in range(-3, 4):
+                    for dy in range(-3, 4):
+                        px, py = cx + dx, cy + dy
+                        if 0 <= px < w and 0 <= py < h:
+                            skin_pixels.append(img[py, px])
+
+        return np.array(skin_pixels)
+
+    def dominant_colors(self, img, landmarks):
+        skin_pixels = self._sample_skin_colors(img, landmarks)
+        if len(skin_pixels) < self.k:
+            skin_pixels = img.reshape(-1, 3)
+
+        pixels = skin_pixels.astype(np.float32)
         km = KMeans(n_clusters=self.k, random_state=42, n_init=10).fit(pixels)
-        # Calculate percentages
         counts = np.bincount(km.labels_)
         percentages = counts / len(pixels) * 100
-        # Sort by percentage descending
         order = np.argsort(percentages)[::-1]
+
         return [
             {
                 'hex': '#%02x%02x%02x' % tuple(km.cluster_centers_[i].astype(int)),
@@ -72,265 +96,173 @@ class SelfieAnalyzer:
             for i in order
         ]
 
-    def color_tone(self, colors):
-        """
-        Determine the color tone (warm, cool, neutral) based on dominant colors.
-        Uses HSL color space for more accurate classification.
-
-        Args:
-            colors (list): List of dominant colors.
-
-        Returns:
-            str: Color tone ('warm', 'cool', or 'neutral').
-        """
+    def skin_tone(self, colors):
         if not colors:
             return 'neutral'
-        
-        # Analyze top 3 colors instead of just one
-        warm_score = 0
-        cool_score = 0
-        neutral_score = 0
-        
-        for i, color_data in enumerate(colors[:3]):
+
+        warm_score = 0.0
+        cool_score = 0.0
+
+        for color_data in colors[:3]:
             hex_color = color_data['hex']
+            weight = color_data['percentage'] / 100.0
             r, g, b = [int(hex_color[j:j+2], 16) for j in (1, 3, 5)]
-            
-            # Normalize RGB to 0-1
-            r_norm, g_norm, b_norm = r/255.0, g/255.0, b/255.0
-            
-            # Calculate HSL
-            max_val = max(r_norm, g_norm, b_norm)
-            min_val = min(r_norm, g_norm, b_norm)
-            l = (max_val + min_val) / 2.0
-            
-            if max_val == min_val:
-                h = 0
-                s = 0
-            else:
-                d = max_val - min_val
-                s = d / (2 - max_val - min_val) if l > 0.5 else d / (max_val + min_val)
-                
-                if max_val == r_norm:
-                    h = 60 * (((g_norm - b_norm) / d + (6 if g_norm < b_norm else 0)) % 6)
-                elif max_val == g_norm:
-                    h = 60 * (((b_norm - r_norm) / d + 2) % 6)
-                else:
-                    h = 60 * (((r_norm - g_norm) / d + 4) % 6)
-            
-            # Weight by percentage (more dominant colors matter more)
-            weight = (3 - i) / 3.0  # First color: 1.0, second: 0.67, third: 0.33
-            
-            # Classify based on hue with saturation consideration
-            if s < 0.1:  # Grayscale
-                neutral_score += weight
-            elif h <= 60 or h >= 300:  # Red-Yellow range
-                # More weight if saturated
-                warm_score += weight * (1 + s * 0.5)
-            elif 60 < h < 150:  # Yellow-Green range
-                if s > 0.5:
-                    cool_score += weight * 0.5
-                else:
-                    neutral_score += weight
-            elif 150 <= h <= 270:  # Green-Blue-Cyan range
-                cool_score += weight * (1 + s * 0.3)
-            elif 270 < h < 300:  # Blue-Magenta range
+
+            rb_diff = r - b
+            yellow_component = (r + g) / 2 - b
+
+            if rb_diff > 30 and yellow_component > 20:
+                warm_score += weight * 1.5
+            elif rb_diff > 15:
+                warm_score += weight
+            elif rb_diff < -10:
+                cool_score += weight * 1.5
+            elif rb_diff < 5:
                 cool_score += weight * 0.7
-        
-        # Determine overall tone
-        if max(warm_score, cool_score, neutral_score) == 0:
-            return 'neutral'
-        
-        max_score = max(warm_score, cool_score, neutral_score)
-        
-        if warm_score == max_score and warm_score > cool_score * 1.2:
+
+            if r > 150 and b > 120 and abs(r - b) < 40 and g < r:
+                cool_score += weight * 0.8
+
+            if r > 140 and g > 110 and b < 100:
+                warm_score += weight * 1.2
+
+        if warm_score > cool_score * 1.3:
             return 'warm'
-        elif cool_score == max_score and cool_score > warm_score * 1.2:
+        elif cool_score > warm_score * 1.3:
             return 'cool'
         else:
             return 'neutral'
 
     def brightness(self, img):
-        """
-        Calculate the brightness value and level of the image.
-
-        Args:
-            img (numpy.ndarray): Input image in RGB format.
-
-        Returns:
-            tuple: (brightness_value, brightness_level)
-        """
-        # Convert to HSV and get average value (brightness)
         hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
         brightness_value = np.mean(hsv[:, :, 2])
-        # Classify brightness level
+
         if brightness_value < 85:
             level = 'low'
         elif brightness_value < 170:
             level = 'medium'
         else:
             level = 'high'
+
         return round(brightness_value, 2), level
 
-    def face_shape(self, img):
-        """
-        Detect and classify the face shape in the image.
-
-        Args:
-            img (numpy.ndarray): Input image in RGB format.
-
-        Returns:
-            str: Face shape ('oblong', 'round', 'heart', 'oval', 'square', or 'not_detected').
-        """
-        # Convert to grayscale for face detection
-        gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-        # Detect faces
-        faces = self.face_cascade.detectMultiScale(gray, 1.1, 5)
-        if len(faces) == 0:
+    def face_shape(self, img, landmarks):
+        if landmarks is None:
             return 'not_detected'
-        
-        # Use the first detected face
-        x, y, w, h = faces[0]
-        face_roi = gray[y:y+h, x:x+w]
-        
-        # Calculate aspect ratio
-        aspect_ratio = w / h
-        
-        # Apply adaptive threshold for better contour detection
-        _, thresh = cv2.threshold(face_roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        # Dilate and erode to connect broken regions
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-        
-        # Find contours
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            # Fallback based on aspect ratio only
-            if aspect_ratio > 1.25:
-                return 'oblong'
-            elif aspect_ratio < 0.85:
-                return 'round'
-            else:
-                return 'oval'
-        
-        # Get the largest contour (face outline)
-        largest_contour = max(contours, key=cv2.contourArea)
-        
-        # Calculate solidity (area / convex hull area)
-        hull = cv2.convexHull(largest_contour)
-        hull_area = cv2.contourArea(hull)
-        contour_area = cv2.contourArea(largest_contour)
-        solidity = contour_area / hull_area if hull_area > 0 else 0.5
-        
-        # Calculate circularity (4π*area / perimeter²)
-        perimeter = cv2.arcLength(largest_contour, True)
-        circularity = (4 * 3.14159 * contour_area) / (perimeter ** 2) if perimeter > 0 else 0
-        
-        # Fit an ellipse to get better roundness measure
-        if len(largest_contour) >= 5:
-            ellipse = cv2.fitEllipse(largest_contour)
-            major_axis = max(ellipse[1])
-            minor_axis = min(ellipse[1])
-            ellipse_ratio = major_axis / minor_axis if minor_axis > 0 else 1.0
-        else:
-            ellipse_ratio = aspect_ratio
-        
-        # Enhanced classification logic
-        # Oblong: high aspect ratio
-        if aspect_ratio > 1.25:
+
+        def dist(a, b):
+            return np.sqrt(
+                (landmarks[a][0] - landmarks[b][0]) ** 2 +
+                (landmarks[a][1] - landmarks[b][1]) ** 2
+            )
+
+        face_length = dist(self.FOREHEAD_TOP, self.CHIN_BOTTOM)
+        face_width = dist(self.LEFT_CHEEK, self.RIGHT_CHEEK)
+        forehead_width = dist(self.LEFT_FOREHEAD, self.RIGHT_FOREHEAD)
+        jaw_width = dist(self.LEFT_JAW, self.RIGHT_JAW)
+        cheekbone_width = dist(self.LEFT_CHEEKBONE, self.RIGHT_CHEEKBONE)
+
+        length_to_width = face_length / face_width if face_width > 0 else 1.0
+        forehead_to_jaw = forehead_width / jaw_width if jaw_width > 0 else 1.0
+        cheekbone_to_jaw = cheekbone_width / jaw_width if jaw_width > 0 else 1.0
+        forehead_to_cheekbone = forehead_width / cheekbone_width if cheekbone_width > 0 else 1.0
+
+        if length_to_width > 1.45:
             return 'oblong'
-        
-        # Round: high circularity and low solidity
-        if circularity > 0.75 and solidity < 0.85:
+
+        if length_to_width < 1.15 and 0.85 < forehead_to_jaw < 1.15:
             return 'round'
-        
-        # Heart: narrow at top, wider at bottom (low aspect ratio + specific solidity)
-        if aspect_ratio < 0.85 and solidity > 0.82:
-            return 'heart'
-        
-        # Square: similar aspect ratio and high solidity
-        if 0.9 <= aspect_ratio <= 1.1 and solidity > 0.85 and circularity < 0.70:
+
+        if length_to_width < 1.25 and forehead_to_jaw < 1.15 and jaw_width >= cheekbone_width * 0.88:
             return 'square'
-        
-        # Oval: everything else (default)
+
+        if forehead_to_jaw > 1.25 or (forehead_to_cheekbone > 0.95 and cheekbone_to_jaw > 1.2):
+            return 'heart'
+
+        if cheekbone_to_jaw > 1.15 and forehead_to_cheekbone < 0.9:
+            return 'diamond'
+
         return 'oval'
 
     def process(self, image_path):
-        """
-        Process the image to extract analysis details.
-
-        Args:
-            image_path (str): Path to the input image.
-
-        Returns:
-            dict: Dictionary containing analysis results.
-        """
-        # Load and preprocess the image
         img = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
         if img is None:
             raise FileNotFoundError(f"Image not found: {image_path}")
-        # Resize if necessary
+
         img = self._resize(img)
-        
-        # Perform analyses
-        colors = self.dominant_colors(img)
+        landmarks = self._get_landmarks(img)
+
+        if landmarks:
+            colors = self.dominant_colors(img, landmarks)
+            color_tone = self.skin_tone(colors)
+            face_structure = self.face_shape(img, landmarks)
+        else:
+            pixels = img.reshape(-1, 3).astype(np.float32)
+            km = KMeans(n_clusters=self.k, random_state=42, n_init=10).fit(pixels)
+            counts = np.bincount(km.labels_)
+            percentages = counts / len(pixels) * 100
+            order = np.argsort(percentages)[::-1]
+
+            colors = [
+                {
+                    'hex': '#%02x%02x%02x' % tuple(km.cluster_centers_[i].astype(int)),
+                    'percentage': round(percentages[i], 2)
+                }
+                for i in order
+            ]
+
+            color_tone = 'unknown'
+            face_structure = 'not_detected'
+
         brightness_value, brightness_level = self.brightness(img)
-        color_tone = self.color_tone(colors)
-        face_structure = self.face_shape(img)
-        
-        # Return results
+
         return {
             'brightness_value': brightness_value,
             'brightness_level': brightness_level,
-            'color_tone': color_tone,
-            'face_structure': face_structure,
-            'dominant_colors': colors
+            'skin_tone': color_tone,
+            'face_shape': face_structure,
+            'dominant_skin_colors': colors
         }
+
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    """
-    REST API endpoint to analyze a selfie image.
-
-    Expects a POST request with an 'image' file.
-
-    Returns:
-        JSON: Analysis results including the original image as base64.
-    """
     if 'image' not in request.files:
         return jsonify({'error': 'No image provided'}), 400
-    
+
     file = request.files['image']
     if file.filename == '':
         return jsonify({'error': 'No image selected'}), 400
-    
-    # Save the uploaded file temporarily
+
     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
         file.save(temp_file.name)
         temp_path = temp_file.name
-    
+
     try:
-        # Initialize analyzer and process the image
         analyzer = SelfieAnalyzer()
         result = analyzer.process(temp_path)
-        
-        # Read the original image and encode to base64
+
         img = cv2.imread(temp_path)
-        _, buffer = cv2.imencode('.jpg', cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        _, buffer = cv2.imencode('.jpg', img)
         img_base64 = base64.b64encode(buffer).decode('utf-8')
+
         result['image'] = img_base64
-        
         return jsonify(result)
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
     finally:
-        # Clean up temporary file
         if os.path.exists(temp_path):
             os.unlink(temp_path)
 
+
 if __name__ == '__main__':
-    # Run the Flask app
-    app.run(debug=True)
-    result = SelfieAnalyzer(k=3).process('selfie.jpg')
-    print(json.dumps(result, indent=2))
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == '--test':
+        image_path = sys.argv[2] if len(sys.argv) > 2 else 'selfie.jpg'
+        result = SelfieAnalyzer(k=3).process(image_path)
+        print(json.dumps(result, indent=2))
+    else:
+        app.run(debug=True)

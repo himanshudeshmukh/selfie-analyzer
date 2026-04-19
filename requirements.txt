@@ -4,3 +4,4 @@ scikit-learn==1.3.1
 numpy==1.24.3
 Werkzeug==2.3.7
 gunicorn==21.2.0
+mediatapipe==0.8.10
