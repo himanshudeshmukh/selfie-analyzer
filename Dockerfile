@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     libxext6 \
     libxrender-dev \
     libglib2.0-0 \
+    libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements.txt and install Python dependencies
