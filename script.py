@@ -11,6 +11,10 @@ import mediapipe as mp
 # Initialize Flask app
 app = Flask(__name__)
 
+# Configure upload limits for Render free tier (512MB RAM)
+# Max 5MB per request to prevent memory issues
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # 5MB
+
 
 class SelfieAnalyzer:
     """
@@ -37,9 +41,9 @@ class SelfieAnalyzer:
         'right_cheek': [345, 346, 347, 348, 349, 350, 352, 355, 371, 423],
     }
 
-    def __init__(self, k=3, max_size=1024):
+    def __init__(self, k=3, max_size=720):
         self.k = k
-        self.max_size = max_size
+        self.max_size = max_size  # Reduced from 1024 to 720 for Render free tier memory optimization
         self.face_mesh = mp.solutions.face_mesh.FaceMesh(
             static_image_mode=True,
             max_num_faces=1,
@@ -227,12 +231,30 @@ class SelfieAnalyzer:
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
+    """
+    REST API endpoint to analyze a selfie image.
+
+    Expects a POST request with an 'image' file.
+    Maximum file size: 5MB
+
+    Returns:
+        JSON: Analysis results including the original image as base64.
+    """
     if 'image' not in request.files:
         return jsonify({'error': 'No image provided'}), 400
 
     file = request.files['image']
     if file.filename == '':
         return jsonify({'error': 'No image selected'}), 400
+
+    # Validate file size (max 5MB for Render free tier memory limit)
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+    
+    MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+    if file_size > MAX_FILE_SIZE:
+        return jsonify({'error': 'Image too large (max 5MB)'}), 400
 
     with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
         file.save(temp_file.name)

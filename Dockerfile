@@ -33,4 +33,8 @@ ENV FLASK_APP=script.py
 ENV FLASK_ENV=production
 
 # Run the application with Gunicorn (production WSGI server)
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--timeout", "120", "script:app"]
+# Optimized for Render free tier (512MB RAM):
+# - 1 worker (uses ~100-150MB)
+# - timeout 60s (image processing should complete quickly)
+# - max-requests 100 (restart worker to prevent memory leaks)
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "60", "--max-requests", "100", "script:app"]
